@@ -237,7 +237,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:1
 <script>
 
 // ============ Google Sheets 연동 ============
-var GS_URL = 'https://script.google.com/macros/s/AKfycbzKEyBD_dKntQL0_fOzELQQHGI7cJwBb7mHYm437tA6z6uvnhgfbS02XZBigoiHc-6_/exec';
+var GS_URL = 'https://script.google.com/macros/s/AKfycbze43JOGYukejNQ-f5TNl--ZzDDxHywkvf7MxuwxvEXeDSsmyO_oVQfNq5OG-l_X5Ah/exec';
 var GS_CACHE = {};   // 로컬 캐시
 var GS_DIRTY = {};   // 변경된 컬렉션 추적
 var GS_TIMER = null; // 디바운스 타이머
@@ -268,74 +268,54 @@ function SAVE(k, v) {
   GS_TIMER = setTimeout(syncToSheets, 1000);
 }
 
-// Google Sheets GET 요청 (JSONP 방식으로 CORS 우회)
-function gsGet(col, callback) {
-  var cbName = 'cb_' + col + '_' + Date.now();
-  window[cbName] = function(res) {
-    delete window[cbName];
-    var old = document.getElementById('sc_' + col);
-    if (old) old.remove();
-    callback(res);
-  };
-  var s = document.createElement('script');
-  s.id  = 'sc_' + col;
-  s.src = GS_URL + '?col=' + col + '&callback=' + cbName;
-  document.head.appendChild(s);
-}
-
-// Google Sheets POST 요청 (이미지 태그 방식으로 저장)
-function gsPost(col, data) {
-  // URL 파라미터로 전달 (GET 방식으로 저장)
-  var cbName = 'cbPost_' + col + '_' + Date.now();
-  window[cbName] = function(res) {
-    delete window[cbName];
-    var old = document.getElementById('scp_' + col);
-    if (old) old.remove();
-  };
-  var payload = encodeURIComponent(JSON.stringify(data));
-  var s = document.createElement('script');
-  s.id  = 'scp_' + col;
-  s.src = GS_URL + '?action=save&col=' + col + '&payload=' + payload + '&callback=' + cbName;
-  document.head.appendChild(s);
-}
-
-// Google Sheets로 변경된 컬렉션 업로드
+// Google Sheets 연동 - fetch 방식
 function syncToSheets() {
   var dirty = Object.keys(GS_DIRTY);
   if (!dirty.length) return;
+  var snapshot = {};
+  dirty.forEach(function(k){ snapshot[k] = GS_CACHE[k] || DB(k); });
   GS_DIRTY = {};
   setSyncStatus('syncing');
-  dirty.forEach(function(col) {
-    gsPost(col, GS_CACHE[col] || DB(col));
+
+  var promises = Object.keys(snapshot).map(function(col) {
+    return fetch(GS_URL, {
+      method: 'POST',
+      headers: {'Content-Type': 'text/plain'},
+      body: JSON.stringify({col: col, data: snapshot[col]})
+    })
+    .then(function(r){ return r.json(); })
+    .catch(function(){ return {ok:false}; });
   });
-  setTimeout(function() { setSyncStatus('online'); }, 2000);
+
+  Promise.all(promises).then(function(results) {
+    var ok = results.every(function(r){ return r.ok; });
+    setSyncStatus(ok ? 'online' : 'error');
+  });
 }
 
 // Google Sheets에서 전체 데이터 불러오기
 function loadFromSheets() {
   setSyncStatus('syncing');
   var cols = ['transactions','fixedExpenses','savings','cmaAccounts'];
-  var loaded = 0;
-  cols.forEach(function(col) {
-    gsGet(col, function(res) {
-      if (res && res.ok && res.data && res.data.length) {
-        GS_CACHE[col] = res.data;
-        localStorage.setItem(col, JSON.stringify(res.data));
-      }
-      loaded++;
-      if (loaded === cols.length) {
-        setSyncStatus('online');
-        renderAll();
-      }
-    });
+  var promises = cols.map(function(col) {
+    return fetch(GS_URL + '?col=' + col)
+      .then(function(r){ return r.json(); })
+      .then(function(res) {
+        if (res && res.ok && res.data && res.data.length) {
+          GS_CACHE[col] = res.data;
+          localStorage.setItem(col, JSON.stringify(res.data));
+        }
+      })
+      .catch(function(){});
   });
-  // 5초 타임아웃
-  setTimeout(function() {
-    if (loaded < cols.length) {
-      setSyncStatus('error');
-      renderAll();
-    }
-  }, 5000);
+
+  Promise.all(promises).then(function() {
+    setSyncStatus('online');
+    renderAll();
+  }).catch(function() {
+    setSyncStatus('error');
+    renderAll();
+  });
 }
 // ============ End Google Sheets ============
 
